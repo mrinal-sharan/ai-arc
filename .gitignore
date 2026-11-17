@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+# Large artefacts stay out of git
+data/
+checkpoints/
+*.pt
+*.pth
+.env
+.DS_Store
