@@ -1,7 +1,7 @@
 import data as data
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 # class Head(nn.Module):
 
@@ -32,34 +32,49 @@ import torch.nn as nn
 
 class GPT(nn.Module):
 
-    def __init__(self, vocab_size, dim, max_t, head_size, n_layers):
-        super().__init__() 
+    def __init__(self, vocab_size, dim, max_t, head_size, n_layers, dropout=0.0):
+        super().__init__()
         self.max_t = max_t
         self.token_table = nn.Embedding(vocab_size, dim)
         self.pos_table = nn.Embedding(max_t, dim)
-        self.blocks = nn.ModuleList([ Block(dim, max_t, head_size) for _ in range(n_layers)])
+        self.drop = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList([ Block(dim, max_t, head_size, dropout) for _ in range(n_layers)])
+        self.final = nn.LayerNorm(dim, bias=False)
+        self.fin_layer = nn.Linear(dim, vocab_size, bias = False)
+        self.identity = nn.Identity()
 
 
-    def forward(self, ids):
+    def forward(self, ids, target= None):
         token_vec = self.token_table(ids)
         pos = torch.arange(ids.shape[1], device=ids.device)
         pos_vec = self.pos_table(pos)
-        fin_vec = token_vec + pos_vec
+        fin_vec = self.drop(token_vec + pos_vec)
 
         for layer in self.blocks:
             fin_vec = layer(fin_vec)
 
-        return fin_vec
+        fin_vec = self.final(fin_vec)
+        fin_vec = self.fin_layer(fin_vec)
+        fin_vec = self.identity(fin_vec)
+        
+        loss = None
+        if target != None:
+           
+            loss = F.cross_entropy(fin_vec.view(ids.shape[0] *ids.shape[1], fin_vec.shape[-1]), target.view(ids.shape[0] *ids.shape[1]))
+
+        return fin_vec, loss
 
 
 class MultiHeadAttention(nn.Module):
 
-    def __init__(self, max_t, dim, head_size):
-        super().__init__() 
+    def __init__(self, max_t, dim, head_size, dropout=0.0):
+        super().__init__()
         self.head_size = head_size
         self.dim = dim
         self.multi_qkv = nn.Linear(dim, dim * 3, bias = False)
         self.merge = nn.Linear(dim, dim, bias =False)
+        self.attn_drop = nn.Dropout(dropout)   # on the attention weights
+        self.out_drop = nn.Dropout(dropout)    # on what gets added to the stream
         self.register_buffer("mask", torch.tril(torch.ones(max_t, max_t)))
         self.identity = nn.Identity()
 
@@ -82,35 +97,36 @@ class MultiHeadAttention(nn.Module):
         logits = self.identity(logits)
         T = logits.shape[-1]
         logits = logits.masked_fill(self.mask[:T,:T] ==0, float('-inf'))
-        weights = torch.softmax(logits, dim=-1)
+        weights = self.attn_drop(torch.softmax(logits, dim=-1))
         res = weights @ v
 
         res = res.transpose(-3, -2)
         res = res.reshape(x.shape[0], x.shape[1], self.dim)
-        return self.merge(res)
+        return self.out_drop(self.merge(res))
 
 
 class FeedForward(nn.Module):
-    def __init__(self, C):
-        super().__init__() 
+    def __init__(self, C, dropout=0.0):
+        super().__init__()
         self.Feed_1= nn.Linear(C, 4*C, bias =False)
         self.Feed_2 = nn.Linear(4*C, C, bias =False)
         self.GELU = nn.GELU()
+        self.drop = nn.Dropout(dropout)
 
     def forward(self, x):
         x = self.Feed_1(x)
         x = self.GELU(x)
         x = self.Feed_2(x)
-        return x
+        return self.drop(x)
 
 class Block(nn.Module):
-    def __init__(self, C, max_t, head_size):
-        super().__init__() 
+    def __init__(self, C, max_t, head_size, dropout=0.0):
+        super().__init__()
         self.head_size = head_size
         self.normal = nn.LayerNorm(C, bias =False)
         self.normal_2 = nn.LayerNorm(C, bias =False)
-        self.Multihead = MultiHeadAttention(max_t, C, head_size)
-        self.FFN = FeedForward(C)
+        self.Multihead = MultiHeadAttention(max_t, C, head_size, dropout)
+        self.FFN = FeedForward(C, dropout)
         
 
     def forward(self,x):
@@ -132,5 +148,17 @@ if __name__ == "__main__":
 
     model = GPT(len(data.chars), 384, 256, 64, 6).to(device)
     x, y = data.batch(32, 256, data.train_set)
-    out = model(torch.from_numpy(x).to(device))
-    print(out.shape)
+    out = model(torch.from_numpy(x).to(device), None)
+    xb = torch.from_numpy(x).to(device)
+    yb = torch.from_numpy(y).to(device)
+
+    logits, loss = model(xb, yb)
+    print("logits:", logits.shape)                       # expect (32, 256, 67)
+    print("start loss:", round(loss.item(), 3), "| ideal ~4.205")
+    print("params:", sum(p.numel() for p in model.parameters()))  # expect 10,771,584
+
+    _, no_loss = model(xb)
+    print("no target ->", no_loss)                       # expect None
+
+    loss.backward()
+    print("backward ok")
