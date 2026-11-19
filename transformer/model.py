@@ -2,6 +2,38 @@ import data as data
 import torch
 import torch.nn as nn
 
+
+class Head(nn.Module):
+
+    def __init__(self, C, head_size, max_t):
+        super().__init__()
+        self.W_q = nn.Linear(C, head_size, bias=False)
+        self.W_k = nn.Linear(C, head_size, bias=False)
+        self.W_v = nn.Linear(C, head_size, bias=False)
+
+
+        self.register_buffer("mask", torch.tril(torch.ones(max_t, max_t)))
+        self.identity = nn.Identity()
+
+
+
+    def forward(self, x):
+        q = self.W_q(x) 
+        k = self.W_k(x) 
+        v = self.W_v(x)
+        logits = (q @ k.mT)/q.shape[-1]**0.5
+        logits = self.identity(logits)
+        T = logits.shape[-1]
+        logits = logits.masked_fill(self.mask[:T,:T] ==0, float('-inf'))
+        weights = torch.softmax(logits, dim=-1)
+
+        return weights @ v
+
+
+
+
+
+
 class GPT(nn.Module):
 
     def __init__(self, vocab_size, dim, max_t):
